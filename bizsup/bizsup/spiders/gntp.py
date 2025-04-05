@@ -5,7 +5,7 @@ import logging
 class GntpSpider(scrapy.Spider):
     name = "gntp"
     allowed_domains = ["btp.or.kr"]
-    start_urls = ["https://www.btp.or.kr/kor/CMS/Board/Board.do?mCode=MN013"]
+    start_urls = ["https://www.btp.or.kr/kor/CMS/Board/Board.do?mCode=MN013"]  # Verified URL from sample.html
     
     def __init__(self, *args, **kwargs):
         super(GntpSpider, self).__init__(*args, **kwargs)
@@ -23,17 +23,20 @@ class GntpSpider(scrapy.Spider):
         # Try to find thread links - multiple selectors based on common BBS patterns
         thread_links = []
         
-        # Try specific CSS patterns for this BBS style
+        # Try specific CSS patterns for this BBS style based on sample.html
         selectors = [
+            'table.bdListTbl tbody tr td.subject p.stitle a::attr(href)',  # Matches the sample.html structure
+            'table.bdListTbl a[href*="mode=view"]::attr(href)',  # Links with mode=view parameter
+            'p.stitle a[href*="board_seq"]::attr(href)',  # Match by board_seq parameter
+            'td.subject a::attr(href)',                   # Simple subject links
             'table.board_list tr td.subject a::attr(href)',  # Common board list pattern
-            'table tr.board_list td.title a::attr(href)',     # Another common pattern
+            'table tr.board_list td.title a::attr(href)',   # Another common pattern
             'a[href*="CMS/Board/Board.do"][href*="seq="]::attr(href)',  # Links with seq parameter
-            'td.subject a::attr(href)',                      # Simple subject links
-            'div.board_list a::attr(href)',                  # Board list container
-            'ul.board_list li a::attr(href)',                # List style board
-            '.bbsContent a[href*="seq"]::attr(href)',        # Content links with seq
-            'a.view_subject::attr(href)',                    # View subject links
-            'a[onclick*="boardView"]::attr(href)'            # Links with boardView JS function
+            'div.board_list a::attr(href)',               # Board list container
+            'ul.board_list li a::attr(href)',             # List style board
+            '.bbsContent a[href*="seq"]::attr(href)',     # Content links with seq
+            'a.view_subject::attr(href)',                 # View subject links
+            'a[onclick*="boardView"]::attr(href)'         # Links with boardView JS function
         ]
         
         # Try each selector until we find matches
@@ -51,7 +54,8 @@ class GntpSpider(scrapy.Spider):
         filtered_thread_urls = []
         for url in thread_urls:
             # Skip pagination links, but keep thread links
-            if ('pageIndex=' in url and 'seq=' not in url) or 'javascript:' in url:
+            # Based on sample.html pagination structure
+            if ('page=' in url and 'board_seq=' not in url and 'mode=view' not in url) or 'javascript:' in url:
                 continue
             filtered_thread_urls.append(url)
         
@@ -91,8 +95,8 @@ class GntpSpider(scrapy.Spider):
         # Default to page 1
         current_page = 1
         
-        # Try to extract page number from URL
-        page_params = ['pageIndex=', 'page=', 'p=']
+        # Try to extract page number from URL - based on sample.html pagination
+        page_params = ['page=', 'pageIndex=', 'p=']
         for param in page_params:
             if param in url:
                 try:
@@ -112,8 +116,11 @@ class GntpSpider(scrapy.Spider):
         # First try to find next page link in pagination elements
         next_page_url = None
         
-        # Try to find pagination links
+        # Try to find pagination links based on sample.html
         pagination_selectors = [
+            f'div.bdListPaging a[href*="page={next_page}"]::attr(href)',  # Matches the sample.html pagination structure
+            f'div.pagelist a[href*="page={next_page}"]::attr(href)',  # Alternative pagination class
+            f'a.nextblock::attr(href)',  # Next block link in pagination
             f'a[href*="pageIndex={next_page}"]::attr(href)',
             f'a[href*="page={next_page}"]::attr(href)',
             f'a[href*="p={next_page}"]::attr(href)',
