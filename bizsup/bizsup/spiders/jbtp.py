@@ -3,15 +3,15 @@ import logging
 import os
 import requests
 from pathlib import Path
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, unquote
 import html2text
 from bs4 import BeautifulSoup
 
 
-class JbbaSpider(scrapy.Spider):
-    name = "jbba"
-    allowed_domains = ["jbba.kr"]
-    start_urls = ["https://www.jbba.kr/bbs/board.php?bo_table=sub01_09&page=1"]
+class JbtpSpider(scrapy.Spider):
+    name = "jbtp"
+    allowed_domains = ["jbtp.or.kr"]
+    start_urls = ["https://www.jbtp.or.kr/board/list.jbtp?boardId=BBS_0000006&menuCd=DOM_000000102001000000&paging=ok&gubun=&searchType=&keyword=&pageNo=1"]
     
     # 실제 게시글 URL 필터링을 위한 패턴 (다운로드 URL은 크롤링하지 않음)
     download_url_patterns = [
@@ -21,11 +21,11 @@ class JbbaSpider(scrapy.Spider):
     ]
     
     def __init__(self, *args, **kwargs):
-        super(JbbaSpider, self).__init__(*args, **kwargs)
+        super(JbtpSpider, self).__init__(*args, **kwargs)
         self.all_thread_urls = []  # 모든 스레드 URL을 저장할 리스트
         self.max_pages = 6  # 크롤링할 최대 페이지 수
         # 저장 디렉토리 설정
-        self.output_dir = Path("jbba_output")
+        self.output_dir = Path("jbtp_output")
         self.output_dir.mkdir(exist_ok=True)
         self.attachments_dir = self.output_dir / "attachments"
         self.attachments_dir.mkdir(exist_ok=True)
@@ -36,17 +36,16 @@ class JbbaSpider(scrapy.Spider):
         """
         self.logger.info(f"Processing page: {response.url}")
         
-        # 스레드 링크 추출 - jbba.kr의 실제 HTML 구조 사용
-        # 게시글 목록에서 제목을 포함하는 링크 추출
-        thread_links = response.css('.td_subject a::attr(href)').getall()
+        # 스레드 링크 추출
+        thread_links = response.css('td a[href*="view.jbtp"]::attr(href)').getall()
         
         if not thread_links:
             self.logger.warning("No thread links found with primary selector, trying alternatives")
             # 대체 선택자 시도
             alternative_selectors = [
-                'table.board_list a::attr(href)',
-                '.subject a::attr(href)',
-                'a[href*="wr_id="]::attr(href)'
+                'a[href*="view.jbtp"]::attr(href)',
+                'td a::attr(href)',
+                'a[href*="dataSid="]::attr(href)'
             ]
             
             for selector in alternative_selectors:
@@ -109,11 +108,11 @@ class JbbaSpider(scrapy.Spider):
             self.logger.info(f"Total thread URLs collected: {len(self.all_thread_urls)}")
             
             # 수집된 모든 스레드 URL로 요청 생성
-            for thread_url in self.all_thread_urls:
+            for idx, thread_url in enumerate(self.all_thread_urls):
                 yield scrapy.Request(
                     url=thread_url,
                     callback=self.parse_thread,
-                    meta={'thread_url': thread_url}
+                    meta={'thread_url': thread_url, 'index': idx + 1}  # 인덱스 추가
                 )
     
     def get_current_page(self, url):
@@ -124,9 +123,9 @@ class JbbaSpider(scrapy.Spider):
         current_page = 1
         
         # URL에서 페이지 번호 추출 시도
-        if 'page=' in url:
+        if 'pageNo=' in url:
             try:
-                current_page = int(url.split('page=')[1].split('&')[0])
+                current_page = int(url.split('pageNo=')[1].split('&')[0])
             except (ValueError, IndexError):
                 pass
         
@@ -142,7 +141,7 @@ class JbbaSpider(scrapy.Spider):
         # 기본 URL (쿼리 스트링 제외)
         base_url = response.url.split('?')[0]
         
-        # 현재 URL의 모든 매개변수 유지하되 page만 변경
+        # 현재 URL의 모든 매개변수 유지하되 pageNo만 변경
         params = {}
         if '?' in response.url:
             query_string = response.url.split('?')[1]
@@ -151,8 +150,8 @@ class JbbaSpider(scrapy.Spider):
                     key, value = param.split('=', 1)
                     params[key] = value
         
-        # page 파라미터 업데이트
-        params['page'] = str(next_page)
+        # pageNo 파라미터 업데이트
+        params['pageNo'] = str(next_page)
         
         # 쿼리 문자열 구성
         query_parts = [f"{k}={v}" for k, v in params.items()]
@@ -165,20 +164,19 @@ class JbbaSpider(scrapy.Spider):
         스레드 페이지에서 본문 내용과 첨부 파일 추출
         """
         thread_url = response.meta.get('thread_url')
+        index = response.meta.get('index', 0)  # 인덱스 가져오기, 기본값 0
         self.logger.info(f"Processing thread: {thread_url}")
         
-        # 게시글 제목 추출 - 실제 HTML 구조에 맞게 다양한 선택자 시도
+        # 게시글 제목 추출
         title = None
         
         # 제목 추출 시도 1: 주요 제목 선택자들
         title_selectors = [
-            'h1.board_view_subject::text',
-            '.view_subject::text',
-            '.subject::text',
-            '.bo_v_tit::text',
-            '.board_view_title::text',
-            '.view-subject::text',
-            '#bo_v_title::text'
+            '.board_view .t_tit::text',
+            '.subject h3::text',
+            '.view-title::text',
+            '.view_tit::text',
+            'h4.content_head::text'
         ]
         
         for selector in title_selectors:
@@ -197,17 +195,14 @@ class JbbaSpider(scrapy.Spider):
                 if title:
                     title = title.strip()
         
-        # 제목 추출 시도 3: 첫 h1 또는 h2 태그
-        if not title:
-            title = response.css('h1::text, h2::text').get()
-            if title:
-                title = title.strip()
-        
         # 제목이 없으면 URL에서 ID 추출하여 대체
         if not title:
             try:
-                wr_id = thread_url.split('wr_id=')[1].split('&')[0]
-                title = f"게시글-{wr_id}"
+                if 'dataSid=' in thread_url:
+                    seq_id = thread_url.split('dataSid=')[1].split('&')[0]
+                else:
+                    seq_id = thread_url.split('boardId=')[1].split('&')[0]
+                title = f"게시글-{seq_id}"
             except (IndexError, ValueError):
                 title = f"게시글-{hash(thread_url) % 10000}"
             
@@ -222,13 +217,14 @@ class JbbaSpider(scrapy.Spider):
         
         # 본문 내용 추출 시도 - 다양한 선택자
         content_selectors = [
-            '#bo_v_con',
-            '.view_content',
-            '.board_view_content',
-            '.content',
-            '.board_view_con',
-            '#bo_content',
-            '.bo_view_content'
+            '.board_view .cont',
+            '.view_cont',
+            '.content_body',
+            '.board_txt',
+            '.view_text',
+            '.bbs_con',
+            '.bbs_con iframe',
+            '.bbs_view .bbs_con'
         ]
         
         for selector in content_selectors:
@@ -246,7 +242,7 @@ class JbbaSpider(scrapy.Spider):
         
         # 여전히 본문을 찾지 못한 경우 div.content 같은 일반적인 선택자 시도
         if not content:
-            content = response.css('div.content, div.entry, article').get()
+            content = response.css('div.content, div.article, div.view_cont, div.bbs_con').get()
         
         if content:
             # HTML 문서 파싱을 위해 BeautifulSoup 사용
@@ -264,19 +260,24 @@ class JbbaSpider(scrapy.Spider):
             # HTML 내용을 마크다운으로 변환
             markdown_content = h2t.handle(str(soup))
             
+            # 인덱스 번호를 사용해 파일 저장
+            # 디렉토리 생성 (첨부파일 저장용)
+            index_dir = self.output_dir / f"{index}"
+            index_dir.mkdir(exist_ok=True)
+            
             # 파일 저장
-            md_filename = self.output_dir / f"{safe_title}.md"
+            md_filename = self.output_dir / f"{index}.md"
             with open(md_filename, 'w', encoding='utf-8') as f:
                 # 메타데이터 추가
                 f.write(f"# {title}\n\n")
                 f.write(f"원본 URL: {thread_url}\n\n")
                 
                 # 게시글 정보 추가
-                author = response.css('.bo_v_info strong::text, .sv_member::text').get()
+                author = response.css('.t_info li:first-child::text, .writer::text').get()
                 if author:
                     f.write(f"작성자: {author.strip()}\n\n")
                 
-                date = response.css('.bo_v_info .if_date::text, .bo_date::text').get()
+                date = response.css('.t_info li:last-child::text, .date::text').get()
                 if date:
                     f.write(f"작성일: {date.strip()}\n\n")
                 
@@ -293,35 +294,58 @@ class JbbaSpider(scrapy.Spider):
         attachment_texts = []
         processed_urls = set()  # 중복 URL 방지
         
-        # 파일 게시판 테이블에서 파일 정보 찾기 (첫 번째 방법)
-        file_table = response.css('#bo_v_file, .board_file')
-        if file_table:
-            for row in file_table.css('tr, li'):
-                link = row.css('a::attr(href)').get()
-                if link and ('download.php' in link or 'file_download' in link):
-                    # 다운로드 URL인지 확인
-                    if '/bbs/download.php' in link or '/bbs/file_download' in link:
-                        text = row.css('a strong::text, a::text').get() or ""
-                        # 이미 처리한 URL인지 확인
-                        if link not in processed_urls:
-                            attachment_links.append(link)
-                            attachment_texts.append(text.strip())
-                            processed_urls.add(link)
-                            self.logger.info(f"Found attachment in table: {link} - {text.strip()}")
-        
-        # 본문 내 파일 다운로드 링크와 텍스트 함께 가져오기 (두 번째 방법)
-        file_links = response.css('a[href*="download.php"], a[href*="file_download"]')
+        # 파일 첨부 링크 찾기 (첫 번째 방법)
+        file_links = response.css('.board_file a[href*="fileDown"], .file_area a[href*="download"], .bbs_filedown a.sbtn_down')
         for link in file_links:
             href = link.css('::attr(href)').get()
             if href and href not in processed_urls:
                 # 다운로드 URL인지 확인
-                if '/bbs/download.php' in href or '/bbs/file_download' in href:
-                    text = link.css('::text').get() or ""
+                if 'fileDown' in href or 'download' in href or 'attach' in href:
+                    # JBTP는 다운로드 버튼 텍스트가 아닌 앞에 있는 파일명을 사용해야 함
+                    if '.bbs_filedown' in link.root.getroottree().getpath(link.root):
+                        # 파일명은 a 태그의 부모 dd 태그의 첫 번째 텍스트 노드에 있음
+                        parent_dd = link.xpath('./ancestor::dd')
+                        if parent_dd:
+                            text = parent_dd.xpath('./text()').get() or ""
+                            text = text.strip()
+                            # 파일명이 비어있거나 짧은 경우(예: "다운로드"), 다른 방법 시도
+                            if not text or len(text) < 5:
+                                # 다른 시도: dd 내부의 모든 텍스트 노드 가져오기
+                                all_text = parent_dd.xpath('string()').get() or ""
+                                all_text = all_text.strip()
+                                if all_text and "다운로드" not in all_text and len(all_text) > 5:
+                                    text = all_text
+                        else:
+                            text = link.css('::text').get() or ""
+                    else:
+                        text = link.css('::text').get() or ""
+                    
                     attachment_links.append(href)
                     attachment_texts.append(text.strip())
                     processed_urls.add(href)
                     self.logger.info(f"Found attachment link: {href} - {text.strip()}")
-                    
+        
+        # 별도의 첨부 파일 영역에서 추가 검색 (두 번째 방법)
+        file_area = response.css('.file_list, .file_area, .add_file, .board_file, .bbs_filedown')
+        if file_area:
+            for row in file_area.css('li, div, a, dd'):
+                link = row.css('a.sbtn_down::attr(href)').get()
+                if link and link not in processed_urls:
+                    # 다운로드 URL인지 확인
+                    if 'fileDown' in link or 'download' in link or 'attach' in link:
+                        # JBTP는 dd 태그 안에 파일명과 다운로드 링크가 함께 있음
+                        if row.root.tag == 'dd':
+                            text = row.xpath('./text()').get() or ""
+                            text = text.strip()
+                        else:
+                            text = row.css('a::text').get() or ""
+                        
+                        # 이미 처리한 URL인지 확인
+                        attachment_links.append(link)
+                        attachment_texts.append(text.strip())
+                        processed_urls.add(link)
+                        self.logger.info(f"Found attachment in file area: {link} - {text.strip()}")
+        
         # 첨부파일 다운로드 URL 필터링
         clean_attachment_links = []
         clean_attachment_texts = []
@@ -334,15 +358,6 @@ class JbbaSpider(scrapy.Spider):
             if 'player' in url or 'preview' in url:
                 continue
                 
-            # 동일한 링크 제거 (wr_id와 no 파라미터가 같으면 동일한 파일로 간주)
-            params = {}
-            if '?' in url:
-                query = url.split('?', 1)[1]
-                for part in query.split('&'):
-                    if '=' in part:
-                        k, v = part.split('=', 1)
-                        params[k] = v
-            
             # 링크 유지
             clean_attachment_links.append(url)
             clean_attachment_texts.append(attachment_texts[i])
@@ -353,7 +368,7 @@ class JbbaSpider(scrapy.Spider):
         
         self.logger.info(f"Found {len(attachment_links)} unique attachments")
         
-        # 첨부파일 다운로드
+        # 첨부파일 다운로드 - 인덱스 디렉토리에 저장
         for i, att_url in enumerate(attachment_links):
             try:
                 # 상대 URL을 절대 URL로 변환
@@ -365,30 +380,30 @@ class JbbaSpider(scrapy.Spider):
                     attachment_text = attachment_texts[i]
                 
                 # URL 매개변수에서 정보 추출
-                wr_id = "unknown"
-                file_no = "0"
+                file_id = "unknown"
+                file_seq = "0"
                 
-                if "wr_id=" in absolute_att_url:
+                if "fileId=" in absolute_att_url:
                     try:
-                        wr_id = absolute_att_url.split("wr_id=")[1].split("&")[0]
+                        file_id = absolute_att_url.split("fileId=")[1].split("&")[0]
                     except:
                         pass
                         
-                if "no=" in absolute_att_url:
+                if "fileSeq=" in absolute_att_url:
                     try:
-                        file_no = absolute_att_url.split("no=")[1].split("&")[0]
+                        file_seq = absolute_att_url.split("fileSeq=")[1].split("&")[0]
                     except:
                         pass
                 
                 # 최종 파일명 결정 (링크 텍스트와 URL 정보 결합)
                 if attachment_text:
                     # 링크 텍스트에서 추출한 이름 사용
-                    base_filename = f"{safe_title}_{attachment_text}"
+                    base_filename = f"{attachment_text}"
                     # 파일명에 사용할 수 없는 문자 제거
                     base_filename = ''.join(c for c in base_filename if c.isalnum() or c in ' ._-').strip()
                 else:
                     # URL 매개변수에서 정보 추출해 고유한 파일명 생성
-                    base_filename = f"{safe_title}_file_{wr_id}_{file_no}"
+                    base_filename = f"file_{file_id}_{file_seq}"
                 
                 # 파일명 길이 제한
                 base_filename = base_filename[:100]
@@ -427,9 +442,8 @@ class JbbaSpider(scrapy.Spider):
                                 server_filename = cd.split('filename=')[1].strip('"\'')
                                 if server_filename:
                                     # 서버가 제공한 파일명 사용
-                                    filename = server_filename
-                                    # 한글 파일명 처리
-                                    filename = filename.encode('latin1').decode('utf-8', errors='ignore')
+                                    # filename = unquote(server_filename)
+                                    filename = server_filename.encode('latin1').decode('utf-8', errors='ignore')
                             except Exception as e:
                                 self.logger.error(f"Error parsing filename: {str(e)}")
                     
@@ -447,14 +461,12 @@ class JbbaSpider(scrapy.Spider):
                             elif 'image/' in content_type:
                                 ext = content_type.replace('image/', '')
                                 filename += f'.{ext}'
-                            else:
-                                filename += '.bin'
                     
                     # 파일명에 사용할 수 없는 문자 제거
                     filename = ''.join(c for c in filename if c.isalnum() or c in ' ._-').strip()
                     
-                    # 파일 저장
-                    att_path = self.attachments_dir / filename
+                    # 파일 저장 (인덱스 디렉토리에 저장)
+                    att_path = index_dir / filename
                     
                     # HTML 오류 페이지 확인
                     is_html = False
